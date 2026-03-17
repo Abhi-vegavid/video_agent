@@ -26,12 +26,12 @@ export function Avatar(props) {
   const {
     playAudio,
     script,
-    headFollow,
+    // headFollow,
     smoothMorphTarget,
     morphTargetSmoothing,
   } = useControls({
     playAudio: false,
-    headFollow: true,
+    // headFollow: false,
     smoothMorphTarget: true,
     morphTargetSmoothing: 0.5,
     script: {
@@ -179,12 +179,19 @@ export function Avatar(props) {
     return () => actions[animation].fadeOut(0.5);
   }, [animation]);
 
-  // CODE ADDED AFTER THE TUTORIAL (but learnt in the portfolio tutorial ♥️)
+  // CODE ADDED AFTER THE TUTORIAL (but learnt in the portfolio tutorial )
+  // useFrame((state) => {
+  //   if (headFollow) {
+  //     group.current.getObjectByName("Head").lookAt(state.camera.position);
+  //   }
+  // });
+
   useFrame((state) => {
-    if (headFollow) {
-      group.current.getObjectByName("Head").lookAt(state.camera.position);
-    }
-  });
+  const head = group.current?.getObjectByName("Head");
+  if (head) {
+    head.lookAt(state.camera.position);
+  }
+});
 
   return (
     <group {...props} dispose={null} ref={group}>
