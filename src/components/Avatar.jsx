@@ -4,32 +4,79 @@ Clean version: Real-time mic lipsync (no JSON/audio files)
 
 import { useAnimations, useFBX, useGLTF } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { useAudioAnalyser } from "../hooks/useAudioAnalyser";
 
 const MOUTH_NAMES = ["mouthOpen", "viseme_aa", "viseme_AA", "A", "aa"];
+const EYES_CLOSED_NAMES = ["eyesClosed", "eyeClosed", "EyeBlink", "blink"];
+const EYES_LOOK_UP_NAMES = ["eyesLookUp", "eyeLookUp", "lookUp"];
+const EYES_LOOK_DOWN_NAMES = ["eyesLookDown", "eyeLookDown", "lookDown"];
+const DEFAULT_VISEME_TIMEOUT_MS = 220;
 
-function getMouthIndex(dict) {
+function getFirstIndex(dict, names) {
   if (!dict) return undefined;
-  for (const name of MOUTH_NAMES) {
+  for (const name of names) {
     if (dict[name] !== undefined) return dict[name];
   }
   return undefined;
 }
 
-export function Avatar({ micEnabled = false, ...props }) {
+function buildVisemeCandidates(name) {
+  const normalized = String(name ?? "aa").trim();
+  const lower = normalized.toLowerCase();
+  const upper = normalized.toUpperCase();
+  return [
+    normalized,
+    lower,
+    upper,
+    `viseme_${lower}`,
+    `viseme_${upper}`,
+    `viseme-${lower}`,
+    `viseme-${upper}`,
+    "mouthOpen",
+  ];
+}
+
+export function Avatar({ audioStream = null, visemePacket = null, ...props }) {
   const { nodes, materials } = useGLTF(
     "/models/646d9dcdc8a5f5bddbfac913.glb"
   );
+
   const headRef = useRef();
   const teethRef = useRef();
+  const eyeLeftRef = useRef();
+  const eyeRightRef = useRef();
+  const group = useRef();
+
   const mouthIndexRef = useRef(null);
   const teethMouthIndexRef = useRef(null);
+  const eyeClosedLeftIndexRef = useRef(null);
+  const eyeClosedRightIndexRef = useRef(null);
+  const eyeLookUpLeftIndexRef = useRef(null);
+  const eyeLookUpRightIndexRef = useRef(null);
+  const eyeLookDownLeftIndexRef = useRef(null);
+  const eyeLookDownRightIndexRef = useRef(null);
+
+  const mouthOpenRef = useRef(0);
+  const visemeValueRef = useRef(0);
+  const visemeNameRef = useRef("aa");
+  const lastVisemeAtRef = useRef(0);
+  const visemeHoldMsRef = useRef(120);
+  const visemeAttackRef = useRef(0.52);
+  const visemeReleaseRef = useRef(0.34);
+  const visemeBlendRef = useRef(0.88);
+  const headVisemeIndexRef = useRef(null);
+  const teethVisemeIndexRef = useRef(null);
+  const prevHeadAppliedIndexRef = useRef(undefined);
+  const prevTeethAppliedIndexRef = useRef(undefined);
+  const speakingEnergyRef = useRef(0);
+  const blinkValueRef = useRef(0);
+  const blinkTargetRef = useRef(0);
+  const nextBlinkAtRef = useRef(0);
+
   const { animations: idleAnimation } = useFBX("/animations/Idle.fbx");
-  const { animations: angryAnimation } = useFBX(
-    "/animations/Angry Gesture.fbx"
-  );
+  const { animations: angryAnimation } = useFBX("/animations/Angry Gesture.fbx");
   const { animations: greetingAnimation } = useFBX(
     "/animations/Standing Greeting.fbx"
   );
@@ -38,78 +85,68 @@ export function Avatar({ micEnabled = false, ...props }) {
   angryAnimation[0].name = "Angry";
   greetingAnimation[0].name = "Greeting";
 
-  const [animation, setAnimation] = useState("Idle");
-  const group = useRef();
-
   const { actions } = useAnimations(
     [idleAnimation[0], angryAnimation[0], greetingAnimation[0]],
     group
   );
 
-  // 🎤 MIC STREAM
-  const [stream, setStream] = useState(null);
-  const streamRef = useRef(null);
-
   useEffect(() => {
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-    };
-  }, []);
+    if (!actions?.Idle) return;
+    actions.Idle.reset().fadeIn(0.5).play();
 
-  useEffect(() => {
-    if (!micEnabled) {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      setStream(null);
-      return;
+    if (actions.Greeting) {
+      actions.Greeting
+        .reset()
+        .setLoop(THREE.LoopRepeat, Infinity)
+        .fadeIn(0.25)
+        .setEffectiveWeight(0)
+        .play();
     }
 
-    if (!navigator?.mediaDevices?.getUserMedia({
-  audio: {
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-  },
-})) {
-      console.error("getUserMedia is not supported in this browser");
-      return;
-    }
-
-    let cancelled = false;
-
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((s) => {
-        if (cancelled) {
-          s.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = s;
-        setStream(s);
-      })
-      .catch((err) => {
-        console.error("Mic access denied:", err);
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((t) => t.stop());
-          streamRef.current = null;
-        }
-        setStream(null);
-      });
-
     return () => {
-      cancelled = true;
+      actions.Idle.fadeOut(0.5);
+      if (actions.Greeting) {
+        actions.Greeting.fadeOut(0.25);
+      }
     };
-  }, [micEnabled]);
+  }, [actions]);
 
-  // 🔊 AUDIO ANALYSER
-  const volume = useAudioAnalyser(stream);
+  useEffect(() => {
+    if (!visemePacket) return;
+    visemeNameRef.current = String(visemePacket.name ?? "aa");
+    visemeValueRef.current = THREE.MathUtils.clamp(
+      Number(visemePacket.value ?? 0),
+      0,
+      1
+    );
+    visemeAttackRef.current = THREE.MathUtils.clamp(
+      Number(visemePacket.attack ?? 0.52),
+      0.05,
+      0.95
+    );
+    visemeReleaseRef.current = THREE.MathUtils.clamp(
+      Number(visemePacket.release ?? 0.34),
+      0.05,
+      0.95
+    );
+    visemeBlendRef.current = THREE.MathUtils.clamp(
+      Number(visemePacket.blend ?? 0.88),
+      0,
+      1
+    );
+    visemeHoldMsRef.current = THREE.MathUtils.clamp(
+      Number(visemePacket.holdMs ?? 120),
+      50,
+      380
+    );
+    lastVisemeAtRef.current = Date.now();
+    // Re-resolve on next frame if backend switches viseme names.
+    headVisemeIndexRef.current = null;
+    teethVisemeIndexRef.current = null;
+  }, [visemePacket]);
 
-  // Stable morph arrays so re-renders don't reset lip sync
+  const volume = useAudioAnalyser(audioStream);
+
   const headInfluences = useMemo(
     () =>
       nodes.Wolf3D_Head?.morphTargetInfluences
@@ -124,67 +161,213 @@ export function Avatar({ micEnabled = false, ...props }) {
         : [],
     [nodes.Wolf3D_Teeth]
   );
+  const eyeLeftInfluences = useMemo(
+    () =>
+      nodes.EyeLeft?.morphTargetInfluences
+        ? [...nodes.EyeLeft.morphTargetInfluences]
+        : [],
+    [nodes.EyeLeft]
+  );
+  const eyeRightInfluences = useMemo(
+    () =>
+      nodes.EyeRight?.morphTargetInfluences
+        ? [...nodes.EyeRight.morphTargetInfluences]
+        : [],
+    [nodes.EyeRight]
+  );
 
-  // 🎭 ANIMATION CONTROL
-  useEffect(() => {
-    if (!actions || !actions[animation]) return;
-    actions[animation].reset().fadeIn(0.5).play();
-    return () => actions[animation].fadeOut(0.5);
-  }, [animation, actions]);
-
-  // 🎯 FRAME LOOP (LIPSYNC + HEAD FOLLOW)
   useFrame((state) => {
     const headMesh = headRef.current;
     const teethMesh = teethRef.current;
+    const leftEyeMesh = eyeLeftRef.current;
+    const rightEyeMesh = eyeRightRef.current;
     if (!headMesh) return;
 
-    const dict = headMesh.morphTargetDictionary;
+    // Resolve indices once.
     if (mouthIndexRef.current === null) {
-      mouthIndexRef.current = getMouthIndex(dict);
+      const headDict = headMesh.morphTargetDictionary;
+      mouthIndexRef.current = getFirstIndex(headDict, MOUTH_NAMES);
+
       if (teethMesh?.morphTargetDictionary) {
-        teethMouthIndexRef.current = getMouthIndex(
-          teethMesh.morphTargetDictionary
+        teethMouthIndexRef.current = getFirstIndex(
+          teethMesh.morphTargetDictionary,
+          MOUTH_NAMES
         );
       }
-      if (mouthIndexRef.current === undefined && dict) {
+
+      if (leftEyeMesh?.morphTargetDictionary) {
+        const leftDict = leftEyeMesh.morphTargetDictionary;
+        eyeClosedLeftIndexRef.current = getFirstIndex(leftDict, EYES_CLOSED_NAMES);
+        eyeLookUpLeftIndexRef.current = getFirstIndex(leftDict, EYES_LOOK_UP_NAMES);
+        eyeLookDownLeftIndexRef.current = getFirstIndex(
+          leftDict,
+          EYES_LOOK_DOWN_NAMES
+        );
+      }
+
+      if (rightEyeMesh?.morphTargetDictionary) {
+        const rightDict = rightEyeMesh.morphTargetDictionary;
+        eyeClosedRightIndexRef.current = getFirstIndex(
+          rightDict,
+          EYES_CLOSED_NAMES
+        );
+        eyeLookUpRightIndexRef.current = getFirstIndex(
+          rightDict,
+          EYES_LOOK_UP_NAMES
+        );
+        eyeLookDownRightIndexRef.current = getFirstIndex(
+          rightDict,
+          EYES_LOOK_DOWN_NAMES
+        );
+      }
+
+      if (mouthIndexRef.current === undefined && headDict) {
         console.log(
           "Lip sync: no matching mouth morph. Head keys:",
-          Object.keys(dict)
+          Object.keys(headDict)
         );
       }
     }
-    const index = mouthIndexRef.current;
 
-    if (index !== undefined) {
-      const current = headMesh.morphTargetInfluences[index];
-      // 🔊 amplify
-      let amplified = volume * 3;
+    // Resolve dynamic viseme indices lazily (backend can change packet name).
+    if (headVisemeIndexRef.current === null) {
+      const headDict = headMesh.morphTargetDictionary;
+      headVisemeIndexRef.current = getFirstIndex(
+        headDict,
+        buildVisemeCandidates(visemeNameRef.current)
+      );
+    }
+    if (teethVisemeIndexRef.current === null && teethMesh?.morphTargetDictionary) {
+      teethVisemeIndexRef.current = getFirstIndex(
+        teethMesh.morphTargetDictionary,
+        buildVisemeCandidates(visemeNameRef.current)
+      );
+    }
 
-      // ✂️ noise gate
-      if (amplified < 0.1) amplified = 0;
+    // Blend: use viseme packets while fresh; fall back to RMS when packets pause.
+    const visemeTimeoutMs = Math.max(DEFAULT_VISEME_TIMEOUT_MS, visemeHoldMsRef.current);
+    const visemeActive = Date.now() - lastVisemeAtRef.current < visemeTimeoutMs;
+    if (mouthIndexRef.current !== undefined || headVisemeIndexRef.current !== undefined) {
+      const curved = Math.pow(Math.max(volume, 0), 0.6);
+      const rmsTarget = THREE.MathUtils.clamp(curved * 1.9, 0, 1);
+      const visemeWeighted = THREE.MathUtils.clamp(
+        visemeValueRef.current * visemeBlendRef.current +
+          rmsTarget * (1 - visemeBlendRef.current),
+        0,
+        1
+      );
+      const target = visemeActive ? visemeWeighted : rmsTarget;
 
-      // 🎯 clamp
-      amplified = Math.min(amplified, 1);
+      const currentMouth = mouthOpenRef.current;
+      const lerpFactor =
+        target > currentMouth ? visemeAttackRef.current : visemeReleaseRef.current;
+      const smoothed = THREE.MathUtils.lerp(currentMouth, target, lerpFactor);
+      mouthOpenRef.current = smoothed;
+      speakingEnergyRef.current = smoothed;
 
-      // 🧠 smooth
-      const smoothed = THREE.MathUtils.lerp(current, amplified, 0.5);
+      const headTargetIndex = visemeActive
+        ? headVisemeIndexRef.current ?? mouthIndexRef.current
+        : mouthIndexRef.current;
+      const teethTargetIndex = visemeActive
+        ? teethVisemeIndexRef.current ?? teethMouthIndexRef.current
+        : teethMouthIndexRef.current;
 
-      // 👄 apply
-      headMesh.morphTargetInfluences[index] = smoothed;
+      if (
+        prevHeadAppliedIndexRef.current !== undefined &&
+        prevHeadAppliedIndexRef.current !== headTargetIndex
+      ) {
+        headMesh.morphTargetInfluences[prevHeadAppliedIndexRef.current] = 0;
+      }
+      if (headTargetIndex !== undefined) {
+        headMesh.morphTargetInfluences[headTargetIndex] = smoothed;
+      }
+      prevHeadAppliedIndexRef.current = headTargetIndex;
 
-      // 🦷 sync teeth
-      if (teethMesh && teethMouthIndexRef.current !== undefined) {
-        teethMesh.morphTargetInfluences[teethMouthIndexRef.current] = smoothed;
+      if (
+        teethMesh &&
+        prevTeethAppliedIndexRef.current !== undefined &&
+        prevTeethAppliedIndexRef.current !== teethTargetIndex
+      ) {
+        teethMesh.morphTargetInfluences[prevTeethAppliedIndexRef.current] = 0;
+      }
+      if (teethMesh && teethTargetIndex !== undefined) {
+        teethMesh.morphTargetInfluences[teethTargetIndex] = smoothed * 0.78;
+      }
+      prevTeethAppliedIndexRef.current = teethTargetIndex;
+    }
+
+    // Blink timing.
+    const now = state.clock.getElapsedTime();
+    if (nextBlinkAtRef.current === 0) {
+      nextBlinkAtRef.current = now + THREE.MathUtils.randFloat(1.8, 4.2);
+    }
+    if (now >= nextBlinkAtRef.current && blinkTargetRef.current === 0) {
+      blinkTargetRef.current = 1;
+    }
+
+    const blinkLerp = blinkTargetRef.current === 1 ? 0.45 : 0.28;
+    blinkValueRef.current = THREE.MathUtils.lerp(
+      blinkValueRef.current,
+      blinkTargetRef.current,
+      blinkLerp
+    );
+
+    if (blinkTargetRef.current === 1 && blinkValueRef.current > 0.92) {
+      blinkTargetRef.current = 0;
+    }
+    if (
+      blinkTargetRef.current === 0 &&
+      blinkValueRef.current < 0.08 &&
+      now >= nextBlinkAtRef.current
+    ) {
+      nextBlinkAtRef.current = now + THREE.MathUtils.randFloat(1.8, 4.2);
+    }
+
+    const lookUp = Math.max(0, Math.sin(now * 0.5)) * 0.12;
+    const lookDown = Math.max(0, Math.sin(now * 0.5 + Math.PI)) * 0.12;
+
+    if (leftEyeMesh?.morphTargetInfluences) {
+      if (eyeClosedLeftIndexRef.current !== undefined) {
+        leftEyeMesh.morphTargetInfluences[eyeClosedLeftIndexRef.current] =
+          blinkValueRef.current;
+      }
+      if (eyeLookUpLeftIndexRef.current !== undefined) {
+        leftEyeMesh.morphTargetInfluences[eyeLookUpLeftIndexRef.current] = lookUp;
+      }
+      if (eyeLookDownLeftIndexRef.current !== undefined) {
+        leftEyeMesh.morphTargetInfluences[eyeLookDownLeftIndexRef.current] =
+          lookDown;
       }
     }
 
-    // 👀 head follow
+    if (rightEyeMesh?.morphTargetInfluences) {
+      if (eyeClosedRightIndexRef.current !== undefined) {
+        rightEyeMesh.morphTargetInfluences[eyeClosedRightIndexRef.current] =
+          blinkValueRef.current;
+      }
+      if (eyeLookUpRightIndexRef.current !== undefined) {
+        rightEyeMesh.morphTargetInfluences[eyeLookUpRightIndexRef.current] = lookUp;
+      }
+      if (eyeLookDownRightIndexRef.current !== undefined) {
+        rightEyeMesh.morphTargetInfluences[eyeLookDownRightIndexRef.current] =
+          lookDown;
+      }
+    }
+
     const headBone = group.current?.getObjectByName("Head");
     if (headBone) {
       headBone.lookAt(state.camera.position);
     }
-  });
 
+    // Layer a subtle looping hand gesture while speaking.
+    if (actions?.Greeting) {
+      const speakingTarget = speakingEnergyRef.current > 0.13 ? 0.42 : 0;
+      const currentWeight = actions.Greeting.getEffectiveWeight();
+      const nextWeight = THREE.MathUtils.lerp(currentWeight, speakingTarget, 0.12);
+      actions.Greeting.setEffectiveWeight(nextWeight);
+      actions.Greeting.timeScale = speakingTarget > 0 ? 0.85 + speakingEnergyRef.current * 0.8 : 0.8;
+    }
+  });
 
   return (
     <group {...props} dispose={null} ref={group}>
@@ -221,21 +404,23 @@ export function Avatar({ micEnabled = false, ...props }) {
       />
 
       <skinnedMesh
+        ref={eyeLeftRef}
         name="EyeLeft"
         geometry={nodes.EyeLeft.geometry}
         material={materials.Wolf3D_Eye}
         skeleton={nodes.EyeLeft.skeleton}
         morphTargetDictionary={nodes.EyeLeft.morphTargetDictionary}
-        morphTargetInfluences={nodes.EyeLeft.morphTargetInfluences}
+        morphTargetInfluences={eyeLeftInfluences}
       />
 
       <skinnedMesh
+        ref={eyeRightRef}
         name="EyeRight"
         geometry={nodes.EyeRight.geometry}
         material={materials.Wolf3D_Eye}
         skeleton={nodes.EyeRight.skeleton}
         morphTargetDictionary={nodes.EyeRight.morphTargetDictionary}
-        morphTargetInfluences={nodes.EyeRight.morphTargetInfluences}
+        morphTargetInfluences={eyeRightInfluences}
       />
 
       <skinnedMesh

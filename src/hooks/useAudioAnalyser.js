@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 export const useAudioAnalyser = (stream) => {
   const [volume, setVolume] = useState(0);
 
   useEffect(() => {
-    if (!stream) return;
+    if (!stream) {
+      setVolume(0);
+      return;
+    }
 
     const audioContext = new AudioContext();
     const analyser = audioContext.createAnalyser();
